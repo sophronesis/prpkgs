@@ -1,0 +1,66 @@
+name: refresh pending.nix
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # daily at 06:00 UTC
+  workflow_dispatch:       # allow manual runs
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-pending-nix
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+
+      - name: install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: cache the prpkgs sqlite db (carries head SHAs + narHashes)
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/prpkgs
+          key: prpkgs-db-${{ github.run_id }}
+          restore-keys: |
+            prpkgs-db-
+
+      - name: install prpkgs
+        run: |
+          uv venv
+          uv pip install -e .
+
+      - name: sync (crawl PRs + head SHAs)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: .venv/bin/python -m prpkgs sync
+
+      - name: prefetch missing narHashes
+        run: .venv/bin/python -m prpkgs prefetch
+
+      - name: export pending.nix
+        run: .venv/bin/python -m prpkgs export -o pending.nix
+
+      - name: commit if changed
+        run: |
+          git config user.name  "prpkgs-bot"
+          git config user.email "prpkgs-bot@users.noreply.github.com"
+          if git diff --quiet -- pending.nix; then
+            echo "pending.nix unchanged, nothing to commit"
+            exit 0
+          fi
+          .venv/bin/python -m prpkgs stats > /tmp/stats.txt
+          git add pending.nix
+          git commit -m "refresh pending.nix $(date -u +%F)" -m "$(cat /tmp/stats.txt)"
+          git push
