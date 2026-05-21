@@ -3,7 +3,12 @@ name: refresh pending.nix
 on:
   schedule:
     - cron: "0 6 * * *"   # daily at 06:00 UTC
-  workflow_dispatch:       # allow manual runs
+  workflow_dispatch:
+    inputs:
+      max_prefetch:
+        description: "Max tarballs to prefetch this run"
+        required: false
+        default: "300"
 
 permissions:
   contents: write
@@ -15,8 +20,25 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 330  # 5h30m, under the 6h job ceiling
+    env:
+      # cap prefetch per run so a cold start doesn't blow the time budget.
+      # subsequent runs hit cache and fill in the rest.
+      MAX_PREFETCH: ${{ github.event.inputs.max_prefetch || '300' }}
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: free disk space on the runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
 
       - name: install nix
         uses: cachix/install-nix-action@v27
@@ -41,18 +63,33 @@ jobs:
           uv venv
           uv pip install -e .
 
+      - name: disk before sync
+        run: df -h /
+
       - name: sync (crawl PRs + head SHAs)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: .venv/bin/python -m prpkgs sync
 
-      - name: prefetch missing narHashes
-        run: .venv/bin/python -m prpkgs prefetch
+      - name: stats after sync
+        run: .venv/bin/python -m prpkgs stats
+
+      - name: prefetch missing narHashes (incremental)
+        # prefetch deletes each unpacked tree from /nix/store right after
+        # hashing, so disk usage stays roughly flat. MAX_PREFETCH caps the
+        # batch so cold-start runs still finish under the job timeout.
+        run: .venv/bin/python -m prpkgs prefetch --max "$MAX_PREFETCH"
+
+      - name: disk after prefetch
+        if: always()
+        run: df -h /
 
       - name: export pending.nix
+        if: always()
         run: .venv/bin/python -m prpkgs export -o pending.nix
 
       - name: commit if changed
+        if: always()
         run: |
           git config user.name  "prpkgs-bot"
           git config user.email "prpkgs-bot@users.noreply.github.com"

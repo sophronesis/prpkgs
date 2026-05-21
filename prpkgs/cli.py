@@ -185,12 +185,16 @@ def prefetch(max_revs: int) -> None:
             def on_progress(i: int, total: int, rev: str, status: str) -> None:
                 bar.update(task, completed=i, description=f"{rev[:7]} {status}")
 
+            def on_error(rev: str, msg: str) -> None:
+                err_console.print(f"[red]prefetch error[/red] {rev[:7]}: {msg}")
+
             stats = prefetch_many(
                 revs,
                 cache_get=db.cache_get,
                 cache_put=db.cache_put,
                 apply_to_rows=lambda rev, h: db.set_nar_hash_for_rev(rev, h),
                 progress=on_progress,
+                on_error=on_error,
             )
 
     console.print()
