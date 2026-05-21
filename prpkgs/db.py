@@ -220,15 +220,18 @@ class Database:
         self.conn.commit()
 
     def revs_needing_hash(self) -> list[str]:
-        """Distinct head_revs for which no nar_hash is on file (in row or cache)."""
+        """Distinct head_revs whose pending_packages rows still lack a nar_hash.
+
+        We don't filter by prefetch_cache here on purpose: prefetch_many's
+        phase 1 consults the cache and writes the hash onto the row, so even
+        cache-hit revs need to flow through to drive that row update.
+        """
         cursor = self.conn.execute(
             """
-            SELECT DISTINCT p.head_rev AS rev
-            FROM pending_packages p
-            LEFT JOIN prefetch_cache c ON p.head_rev = c.rev
-            WHERE p.head_rev IS NOT NULL
-              AND (p.nar_hash IS NULL OR p.nar_hash = '')
-              AND c.nar_hash IS NULL
+            SELECT DISTINCT head_rev AS rev
+            FROM pending_packages
+            WHERE head_rev IS NOT NULL
+              AND (nar_hash IS NULL OR nar_hash = '')
             """
         )
         return [row["rev"] for row in cursor]

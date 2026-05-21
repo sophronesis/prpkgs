@@ -66,6 +66,12 @@ jobs:
       - name: disk before sync
         run: df -h /
 
+      - name: warm cache from committed pending.nix
+        # the committed pending.nix doubles as a persistent (rev, narHash)
+        # cache, so we only spend network on PRs whose head moved since the
+        # last commit. avoids re-prefetching ~1000 tarballs every run.
+        run: .venv/bin/python -m prpkgs warm-cache pending.nix
+
       - name: sync (crawl PRs + head SHAs)
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -78,7 +84,7 @@ jobs:
         # prefetch deletes each unpacked tree from /nix/store right after
         # hashing, so disk usage stays roughly flat. MAX_PREFETCH caps the
         # batch so cold-start runs still finish under the job timeout.
-        run: .venv/bin/python -m prpkgs prefetch --max "$MAX_PREFETCH"
+        run: .venv/bin/python -m prpkgs prefetch --max "$MAX_PREFETCH" --workers 4
 
       - name: disk after prefetch
         if: always()

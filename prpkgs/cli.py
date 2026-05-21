@@ -17,7 +17,12 @@ from .crawler import NEW_PACKAGE_LABEL, NixpkgsPRCrawler
 from .db import Database
 from .export import export as render_pending_nix
 from .models import PendingPackage
-from .prefetch import PrefetchError, check_tools_available, prefetch_many
+from .prefetch import (
+    PrefetchError,
+    check_tools_available,
+    prefetch_many,
+    seed_cache_from_pending_nix,
+)
 
 console = Console()
 err_console = Console(stderr=True)
@@ -152,7 +157,24 @@ def sync(label: str, max_results: int, prune: bool, refresh_revs: bool) -> None:
     type=int,
     help="Limit number of revs prefetched this run (0 = no limit).",
 )
-def prefetch(max_revs: int) -> None:
+@click.option(
+    "--workers",
+    "-j",
+    default=1,
+    type=int,
+    help="Parallel fetch workers (default 1; 4-8 is a good local choice).",
+)
+@click.option(
+    "--progressista/--no-progressista",
+    default=False,
+    help="Report progress to the progressista dashboard.",
+)
+@click.option(
+    "--task-id",
+    default=None,
+    help="Progressista task_id (defaults to host:prpkgs:prefetch).",
+)
+def prefetch(max_revs: int, workers: int, progressista: bool, task_id: str | None) -> None:
     """Compute SRI narHashes for every PR head still missing one.
 
     Hashes are cached by commit SHA, so this is incremental: PRs that haven't
@@ -164,6 +186,14 @@ def prefetch(max_revs: int) -> None:
         err_console.print(f"[red]error:[/red] {e}")
         sys.exit(1)
 
+    safe_tqdm = None
+    if progressista:
+        safe_tqdm = _load_progressista()
+        if safe_tqdm is None:
+            err_console.print(
+                "[yellow]progressista unavailable, falling back to rich progress[/yellow]"
+            )
+
     with Database() as db:
         revs = db.revs_needing_hash()
         if not revs:
@@ -173,29 +203,42 @@ def prefetch(max_revs: int) -> None:
             console.print(f"limiting to {max_revs} of {len(revs)} pending revs")
             revs = revs[:max_revs]
 
-        console.print(f"prefetching [cyan]{len(revs)}[/cyan] tarballs ...")
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("{task.completed}/{task.total}  {task.description}"),
-            TimeElapsedColumn(),
-            console=console,
-        ) as bar:
-            task = bar.add_task("starting", total=len(revs))
+        console.print(
+            f"prefetching [cyan]{len(revs)}[/cyan] tarballs "
+            f"with [cyan]{workers}[/cyan] worker(s) ..."
+        )
 
-            def on_progress(i: int, total: int, rev: str, status: str) -> None:
-                bar.update(task, completed=i, description=f"{rev[:7]} {status}")
-
-            def on_error(rev: str, msg: str) -> None:
-                err_console.print(f"[red]prefetch error[/red] {rev[:7]}: {msg}")
-
-            stats = prefetch_many(
+        def run_with_progress(progress_cb, on_error):
+            return prefetch_many(
                 revs,
                 cache_get=db.cache_get,
                 cache_put=db.cache_put,
                 apply_to_rows=lambda rev, h: db.set_nar_hash_for_rev(rev, h),
-                progress=on_progress,
+                progress=progress_cb,
                 on_error=on_error,
+                workers=workers,
             )
+
+        def on_error(rev: str, msg: str) -> None:
+            err_console.print(f"[red]prefetch error[/red] {rev[:7]}: {msg}")
+
+        if safe_tqdm is not None:
+            stats = _prefetch_with_progressista(
+                safe_tqdm, revs, task_id, run_with_progress, on_error
+            )
+        else:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("{task.completed}/{task.total}  {task.description}"),
+                TimeElapsedColumn(),
+                console=console,
+            ) as bar:
+                task = bar.add_task("starting", total=len(revs))
+
+                def on_progress(i: int, total: int, rev: str, status: str) -> None:
+                    bar.update(task, completed=i, description=f"{rev[:7]} {status}")
+
+                stats = run_with_progress(on_progress, on_error)
 
     console.print()
     console.print("[green]prefetch done[/green]")
@@ -208,6 +251,69 @@ def prefetch(max_revs: int) -> None:
         if len(stats.failed_revs) > 5:
             console.print(f"    (+{len(stats.failed_revs) - 5} more)")
         sys.exit(1)
+
+
+def _load_progressista():
+    """Return SafeTqdm class if progressista is reachable, else None."""
+    import os
+    import sys as _sys
+
+    _sys.path.insert(0, os.path.expanduser("~/.claude/progressista"))
+    try:
+        from progressista_safe import SafeTqdm
+
+        return SafeTqdm
+    except Exception:
+        return None
+
+
+def _prefetch_with_progressista(safe_tqdm, revs, task_id, run, on_error):
+    import socket
+
+    host = socket.gethostname().split(".")[0]
+    tid = task_id or f"{host}:prpkgs:prefetch"
+    bar = safe_tqdm(
+        total=len(revs),
+        desc="prefetch nixpkgs tarballs",
+        server_url="https://prog.sophronesis.dev/progress",
+        task_id=tid,
+        unit="tarballs",
+    )
+    counter = {"n": 0}
+
+    def on_progress(i: int, total: int, rev: str, status: str) -> None:
+        delta = i - counter["n"]
+        if delta > 0:
+            bar.update(delta)
+            counter["n"] = i
+        bar.set_description(f"{rev[:7]} {status}")
+
+    try:
+        return run(on_progress, on_error)
+    finally:
+        bar.close()
+
+
+@main.command(name="warm-cache")
+@click.argument(
+    "path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=Path("pending.nix"),
+)
+def warm_cache(path: Path) -> None:
+    """Seed the prefetch cache from a previously generated pending.nix.
+
+    Lets a committed `pending.nix` act as a persistent narHash cache: re-runs
+    skip every rev whose hash is already pinned in the file, prefetch only
+    has to work on new / moved PRs.
+    """
+    with Database() as db:
+        try:
+            n = seed_cache_from_pending_nix(path, db.cache_put)
+        except PrefetchError as e:
+            err_console.print(f"[red]error:[/red] {e}")
+            sys.exit(1)
+    console.print(f"[green]warmed[/green] {n} (rev, narHash) pairs from {path}")
 
 
 @main.command()

@@ -12,6 +12,7 @@ call is short-circuited when the caller already knows the rev is fresh.
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -178,9 +179,21 @@ class NixpkgsPRCrawler:
                 return
             time.sleep(self.sleep_between_pages)
 
-    def _get_with_retry(self, url: str, params: dict | None = None, max_tries: int = 5):
+    def _get_with_retry(self, url: str, params: dict | None = None, max_tries: int = 6):
         for attempt in range(max_tries):
-            resp = self.client.get(url, params=params)
+            try:
+                resp = self.client.get(url, params=params)
+            except (
+                httpx.ReadTimeout,
+                httpx.ConnectTimeout,
+                httpx.ReadError,
+                httpx.ConnectError,
+            ) as e:
+                # transient network glitch - back off and retry
+                wait = min(5 * (attempt + 1), 60)
+                print(f"network error on {url}: {e!r}; retry in {wait}s", file=sys.stderr)
+                time.sleep(wait)
+                continue
             if resp.status_code == 200:
                 return resp
             if resp.status_code == 404:
