@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -33,6 +34,17 @@ from typing import Callable
 TARBALL_URL = "https://github.com/NixOS/nixpkgs/archive/{rev}.tar.gz"
 
 KEEP_STORE_PATHS = os.environ.get("PRPKGS_KEEP_STORE_PATHS", "").lower() in (
+    "1",
+    "true",
+    "yes",
+)
+
+# nix-prefetch-url goes through the nix daemon, which serializes the
+# add-to-store step and caps real concurrency at 2-3 even with 8 workers.
+# We get 5-10x faster end to end by downloading + unpacking to a tempdir
+# ourselves and computing the NAR hash with `nix-hash` (which does not
+# require the daemon). Set PRPKGS_USE_DAEMON=1 to fall back if needed.
+USE_DAEMON = os.environ.get("PRPKGS_USE_DAEMON", "").lower() in (
     "1",
     "true",
     "yes",
@@ -52,8 +64,15 @@ class PrefetchStats:
 
 
 def check_tools_available() -> None:
-    """Raise if `nix` / `nix-prefetch-url` / `nix-store` are missing."""
-    for tool in ("nix", "nix-prefetch-url", "nix-store"):
+    """Raise if any required CLI is missing.
+
+    Daemon-free path needs `curl`, `tar`, `nix-hash`, and `nix` (for the
+    hash-format conversion). Daemon path additionally needs
+    `nix-prefetch-url` and `nix-store`.
+    """
+    base = ["nix", "nix-hash", "curl", "tar"]
+    extra = ["nix-prefetch-url", "nix-store"] if USE_DAEMON else []
+    for tool in base + extra:
         if shutil.which(tool) is None:
             raise PrefetchError(f"`{tool}` not on PATH - install nix or enter `nix develop`")
 
@@ -137,8 +156,44 @@ def _delete_store_path(path: str) -> None:
     )
 
 
-def prefetch_rev(rev: str) -> str:
-    """Fetch a single tarball, return its SRI sha256, free disk."""
+def _prefetch_direct(rev: str) -> str:
+    """Daemon-free path: curl + tar + nix-hash on a tempdir.
+
+    Mirrors fetchTarball: strip the tarball's top-level directory before
+    hashing so the resulting NAR hash is what `fetchTarball { sha256=...; }`
+    will validate against.
+    """
+    url = TARBALL_URL.format(rev=rev)
+    with tempfile.TemporaryDirectory(prefix="prpkgs-") as td:
+        # Pipe curl directly to tar so we never write the tarball to disk.
+        # --strip-components=1 drops the top-level `nixpkgs-<rev>/`, matching
+        # fetchTarball semantics.
+        proc = subprocess.run(
+            [
+                "sh",
+                "-c",
+                f"curl --fail --silent --show-error --location "
+                f"'{url}' | tar -xz --strip-components=1 -C '{td}'",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr.strip() or proc.stdout.strip())[:400]
+            raise PrefetchError(f"download/unpack failed for {rev}: {err}")
+        proc = subprocess.run(
+            ["nix-hash", "--type", "sha256", "--base32", td],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr.strip() or proc.stdout.strip())[:400]
+            raise PrefetchError(f"nix-hash failed for {rev}: {err}")
+        base32 = proc.stdout.strip()
+    return _to_sri(base32)
+
+
+def _prefetch_via_daemon(rev: str) -> str:
     base32, store_path = _prefetch_with_path(rev)
     try:
         sri = _to_sri(base32)
@@ -146,6 +201,13 @@ def prefetch_rev(rev: str) -> str:
         if not KEEP_STORE_PATHS:
             _delete_store_path(store_path)
     return sri
+
+
+def prefetch_rev(rev: str) -> str:
+    """Fetch a single tarball, return its SRI sha256, free disk."""
+    if USE_DAEMON:
+        return _prefetch_via_daemon(rev)
+    return _prefetch_direct(rev)
 
 
 def parse_pending_nix(path: Path) -> dict:
