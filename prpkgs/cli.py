@@ -250,7 +250,13 @@ def prefetch(max_revs: int, workers: int, progressista: bool, task_id: str | Non
             console.print(f"    - {rev}")
         if len(stats.failed_revs) > 5:
             console.print(f"    (+{len(stats.failed_revs) - 5} more)")
-        sys.exit(1)
+        # best-effort: individual tarball fetches fail transiently (oversized
+        # archives, GitHub timeouts / rate limits) and those revs simply retry
+        # on the next run since they never recorded a narHash. only fail hard
+        # when *nothing* was fetched, which points at a systemic problem
+        # (network down, API broken) rather than a few flaky tarballs.
+        if stats.fetched == 0:
+            sys.exit(1)
 
 
 def _load_progressista():
