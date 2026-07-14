@@ -4570,7 +4570,7 @@
     rev = "aae8cda0c3029700b146166d9e267a99c1f3f884";
     narHash = "sha256-tmz/vjRzyYOTrrVMu2d54B5WXlfOCsY+nJUpuJCP6co=";
     attr = "recoll-kio";
-    version = "${recoll.version}";
+    version = "\${recoll.version}";
     author = "numkem";
     mergeReady = false;
   };
@@ -4579,7 +4579,7 @@
     rev = "bd8be61558a965dcc6bfcbdde034492f230d8418";
     narHash = "sha256-P2pQme6wHnRkSmpw2sbux9vlnjlW3Z/VC7CsU2BWzLQ=";
     attr = "recoll-krunner";
-    version = "${recoll.version}";
+    version = "\${recoll.version}";
     author = "numkem";
     mergeReady = false;
   };

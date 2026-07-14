@@ -55,7 +55,13 @@ def pick_best(
 
 
 def _escape(s: str) -> str:
-    return s.replace("\\", "\\\\").replace('"', '\\"')
+    # Escape for a Nix double-quoted string: backslash, double-quote, and the
+    # antiquotation opener `${`. A parsed version like `${recoll.version}` (some
+    # PRs carry a Nix expression, not a literal) would otherwise render as a
+    # live interpolation of an unbound variable and break `import pending.nix`.
+    return (
+        s.replace("\\", "\\\\").replace('"', '\\"').replace("${", "\\${")
+    )
 
 
 def render_pending_nix(
