@@ -104,6 +104,14 @@ jobs:
             exit 0
           fi
           .venv/bin/python -m prpkgs stats > /tmp/stats.txt
+          # ground-truth gate: never push an attrset that consumers can't parse
+          # (2026-11-11: a PR adding a package named `with` rendered as a bare
+          # keyword attr and broke eval for a day)
+          if ! nix-instantiate --parse pending.nix >/dev/null; then
+            echo "::error::exported pending.nix does not parse - refusing to commit"
+            git checkout -- pending.nix
+            exit 1
+          fi
           git add pending.nix
           git commit -m "refresh pending.nix $(date -u +%F)" -m "$(cat /tmp/stats.txt)"
           git push

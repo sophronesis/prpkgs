@@ -6806,7 +6806,7 @@
     author = "philocalyst";
     mergeReady = false;
   };
-  with = {
+  "with" = {
     pr = 586139;
     rev = "f4efb79b356adb1136c889167f18a27550fad1b5";
     narHash = "sha256-NWv3QTb6CRqY9Mh9y9c5kIwytFs8Jz8VwxBJh+JTL68=";

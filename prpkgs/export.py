@@ -64,6 +64,21 @@ def _escape(s: str) -> str:
     )
 
 
+# Nix reserved words can't be used as bare attribute names (`with = {...}` is
+# a syntax error), so a package literally named `with` must render quoted.
+NIX_KEYWORDS = frozenset(
+    {"if", "then", "else", "assert", "with", "let", "in", "rec", "inherit", "or"}
+)
+
+
+def _attr_name(name: str) -> str:
+    # Bare attr name when it's a plain identifier, double-quoted otherwise.
+    # (true/false/null are literals, not keywords - bare `{ true = ...; }` parses.)
+    if NAME_RE.match(name) and name not in NIX_KEYWORDS:
+        return name
+    return f'"{_escape(name)}"'
+
+
 def render_pending_nix(
     packages: Iterable[PendingPackage], require_hash: bool = True
 ) -> tuple[str, dict]:
@@ -85,7 +100,7 @@ def render_pending_nix(
         version = pkg.version or ""
         if pkg.nar_hash and pkg.head_rev:
             buf.write(
-                f"  {name} = {{\n"
+                f"  {_attr_name(name)} = {{\n"
                 f"    pr = {pkg.pr_number};\n"
                 f'    rev = "{_escape(pkg.head_rev)}";\n'
                 f'    narHash = "{_escape(pkg.nar_hash)}";\n'
@@ -98,7 +113,7 @@ def render_pending_nix(
         else:
             # impure fallback, only emitted with --allow-unhashed
             buf.write(
-                f"  {name} = {{\n"
+                f"  {_attr_name(name)} = {{\n"
                 f"    pr = {pkg.pr_number};\n"
                 f'    attr = "{_escape(attr)}";\n'
                 f'    version = "{_escape(version)}";\n'
